@@ -104,7 +104,7 @@ A real-time speech-to-text translation application designed for healthcare provi
 
 6. Open your browser and navigate to:
    ```
-   http://localhost:8888
+   http://localhost:8800
    ```
 
 ## Usage
