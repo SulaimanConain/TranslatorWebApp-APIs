@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universal AI Translator & Assistant</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <div style="display: none;">
+        <!-- Copy icon -->
+        <svg id="copy-icon-template" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        <!-- Check icon for copy success -->
+        <svg id="check-icon-template" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"/>
+        </svg>
+    </div>
+</head>
+<body>
+    <div class="top-bar">
+        <div class="top-bar-content">
+            <div class="top-bar-logo">
+                <img src="{{ url_for('static', filename='images/advanceailab.png') }}" alt="AdvanceAI Lab Logo" class="logo-image">
+            </div>
+            <div class="top-bar-actions">
+                <span class="user-name">Welcome, {{ user.first_name }}</span>
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+                    <svg class="theme-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="5"/>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                    </svg>
+                </button>
+                <a href="{{ url_for('logout') }}" class="sign-out-button">Sign Out</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="app-container">
+        <div class="split-layout">
+            <!-- Translator Section -->
+            <div class="translator-section">
+                <div class="glass-card">
+                    <div class="header">
+                        <div class="header-content">
+                            <div class="logo-wrapper">
+                                <div class="logo">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 2a3 3 0 0 0-3 3v1h6V5a3 3 0 0 0-3-3z"/>
+                                        <path d="M19 6H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z"/>
+                                        <path d="M9 12h6"/>
+                                        <path d="M12 9v6"/>
+                                    </svg>
+                                </div>
+                                <h2>Universal Translator & Assistant</h2>
+                            </div>
+                            <div class="actions">
+                                <div class="action-group">
+                                    <div class="counter-group">
+                                        <span class="counter-label"></span>
+                                        <span id="translations-remaining" class="translations-remaining">200</span>
+                                    </div>
+                                    <div class="toggle-wrapper">
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="translation-toggle" checked>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                        <span class="toggle-label">Translations</span>
+                                    </div>
+                                    <button id="clear-button" class="clear-button" aria-label="Clear conversation">
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M3 6h18"/>
+                                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                        </svg>
+                                        Clear
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="content-wrapper">
+                        <div class="translation-area">
+                            <div class="empty-state" id="empty-state">
+                                <div class="pulse-animation">
+                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                        <line x1="12" y1="19" x2="12" y2="23"/>
+                                        <line x1="8" y1="23" x2="16" y2="23"/>
+                                    </svg>
+                                </div>
+                                <p>Start Speaking</p>
+                                <span class="subtitle">Your conversation will be translated instantly</span>
+                            </div>
+                            <div class="translations" id="translations"></div>
+                        </div>
+
+                        <div class="controls">
+                            <div class="language-select-group">
+                                <div class="language-select-wrapper">
+                                    <label for="input-language-select">Select Transcription Language</label>
+                                    <div class="select-container">
+                                        <select id="input-language-select" class="language-select">
+                                            <option value="en" selected>English</option>
+                                            <option value="ar-SA">Arabic</option>
+                                            <option value="bn-IN">Bengali</option>
+                                            <option value="zh-CN">Chinese (Simplified)</option>
+                                            <option value="fr-FR">French</option>
+                                            <option value="de-DE">German</option>
+                                            <option value="gu-IN">Gujarati</option>
+                                            <option value="hi-IN">Hindi</option>
+                                            <option value="mr-IN">Marathi</option>
+                                            <option value="mn-MN">Mongolian</option>
+                                            <option value="fa-IR">Persian</option>
+                                            <option value="pt-BR">Portuguese</option>
+                                            <option value="pa-IN">Punjabi</option>
+                                            <option value="ru-RU">Russian</option>
+                                            <option value="es-ES">Spanish</option>
+                                            <option value="sv-SE">Swedish</option>
+                                            <option value="ta-IN">Tamil</option>
+                                            <option value="te-IN">Telugu</option>
+                                            <option value="ur-PK">Urdu</option>
+                                        </select>
+                                        <svg class="select-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="6 9 12 15 18 9"/>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="language-select-wrapper">
+                                    <label for="target-language-select">Target Language(Translation)</label>
+                                    <div class="select-container">
+                                        <select id="target-language-select" class="language-select">
+                                            <option value="en" selected>English</option>
+                                            <option value="hi">Hindi</option>
+                                            <option value="ar">Arabic</option>
+                                            <option value="pt">Portuguese</option>
+                                        </select>
+                                        <svg class="select-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="6 9 12 15 18 9"/>
+                                        </svg>
+                                    </div>
+                                </div>
+                            </div>
+                            <button id="record-button" class="record-button" onclick="toggleRecording()">
+                                <span class="button-content">
+                                    <svg class="mic-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                        <line x1="12" y1="19" x2="12" y2="23"/>
+                                        <line x1="8" y1="23" x2="16" y2="23"/>
+                                    </svg>
+                                    <span>Start Recording</span>
+                                </span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- AI Section -->
+            <div class="ai-section">
+                <!-- Summary Card -->
+                <div class="ai-card">
+                    <div class="ai-card-header">
+                        <h3 class="ai-card-title">Conversation Summary</h3>
+                    </div>
+                    <div class="ai-card-content">
+                        <div class="summary-wrapper">
+                            <div id="summary-content" class="summary-content">
+                                No conversation summary available yet. Start a conversation and click "Generate Summary" to create one.
+                            </div>
+                            <button class="copy-button summary-copy-button" aria-label="Copy summary" style="display: none;">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="chat-input-container">
+                        <button id="generate-summary-button" class="generate-summary-button">Generate Summary</button>
+                    </div>
+                </div>
+                
+                <!-- Chat Card -->
+                <div class="ai-card">
+                    <div class="ai-card-header">
+                        <h3 class="ai-card-title">AI Assistant</h3>
+                    </div>
+                    <div class="ai-card-content">
+                        <div id="chat-messages" class="chat-messages">
+                            <div class="chat-message ai">
+                                Hello! I'm your AI assistant. I can help answer questions about the conversation, provide clarifications, or offer additional insights. How can I help you today?
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-container">
+                        <input type="text" id="chat-input" class="chat-input" placeholder="Type your message...">
+                        <button id="send-button" class="send-button">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13"/>
+                                <path d="M22 2L15 22L11 13L2 9L22 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Clear Confirmation Modal -->
+    <div id="clearConfirmationModal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Clear Conversation</h3>
+            </div>
+            <div class="modal-body">
+                Are you sure you want to clear this conversation? This action cannot be undone.
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-clear" class="modal-button cancel">Cancel</button>
+                <button id="confirm-clear" class="modal-button confirm">Clear</button>
+            </div>
+        </div>
+    </div>
+    <div class="footer-links">
+        <a href="{{ url_for('privacy_policy') }}">Privacy Policy</a>
+    </div>
+    
+    <script id="translation-item-template" type="text/template">
+        <div class="translation-item">
+            <div class="translation-meta">
+                <span class="timestamp"></span>
+                <span class="language"></span>
+            </div>
+            <div class="text-wrapper">
+                <div class="text-line">
+                    <p class="translation-text"></p>
+                    <button class="copy-button" aria-label="Copy original text">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="text-line">
+                    <p class="translated-text"></p>
+                    <button class="copy-button" aria-label="Copy translated text">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - Healthcare AI Translator</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/auth.css') }}">
+</head>
+<body>
+    <div class="privacy-container">
+        <div class="privacy-card">
+            <div class="privacy-header">
+                <div class="logo">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a3 3 0 0 0-3 3v1h6V5a3 3 0 0 0-3-3z"/>
+                        <path d="M19 6H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z"/>
+                        <path d="M9 12h6"/>
+                        <path d="M12 9v6"/>
+                    </svg>
+                </div>
+                <h1>Privacy Policy</h1>
+            </div>
+
+            <div class="privacy-content">
+                <section>
+                    <h2>Data Collection and Usage</h2>
+                    <p><strong>Personal Information:</strong> We collect basic user information (name, email) through Google OAuth for authentication purposes only.</p>
+                    <p><strong>Medical Data:</strong></p>
+                    <ul>
+                        <li>All conversations are processed locally</li>
+                        <li>No conversation data is stored permanently</li>
+                        <li>Translations are temporarily cached for the session only</li>
+                        <li>All data is automatically cleared upon session end</li>
+                    </ul>
+                </section>
+
+                <section>
+                    <h2>Data Security</h2>
+                    <ul>
+                        <li>End-to-end encryption for all communications</li>
+                        <li>Regular security audits and updates</li>
+                        <li>Strict access controls and authentication</li>
+                        <li>Compliance with healthcare data protection standards</li>
+                    </ul>
+                </section>
+
+                <section>
+                    <h2>User Rights</h2>
+                    <ul>
+                        <li>Right to access your data</li>
+                        <li>Right to delete your account</li>
+                        <li>Right to opt-out of data collection</li>
+                        <li>Right to data portability</li>
+                    </ul>
+                </section>
+
+                <section>
+                    <h2>Contact Information</h2>
+                    <p>For privacy-related inquiries:</p>
+                    <ul>
+                        <li>Email: ceo@advanceailab.com</li>
+                        <li>Phone: +1 (365) 885-8786</li>
+                        <li>Address: 36 Princeton terrace, Brampton, ON, L6S 3S8</li>
+                    </ul>
+                </section>
+            </div>
+
+            <div class="privacy-footer">
+                <a href="{{ url_for('index') }}" class="back-button">Back to Application</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html> 

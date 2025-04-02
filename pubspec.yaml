@@ -1,0 +1,17 @@
+name: healthcare_translator
+description: Healthcare Translation Application
+version: 1.0.0+1
+publish_to: none
+
+environment:
+  sdk: ">=2.17.0 <3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flet: ^0.26.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/ 

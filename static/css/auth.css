@@ -1,0 +1,224 @@
+/* Authentication Styles */
+.auth-container {
+    min-height: 100vh;
+    min-height: 100dvh; /* For mobile browsers */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: clamp(1rem, 5vw, 2rem);
+    background-color: var(--bg-color);
+}
+
+.auth-card {
+    background-color: var(--card-bg);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    padding: clamp(1.5rem, 4vw, 2rem);
+    width: min(100%, 400px);
+    border: 1px solid var(--border-color);
+}
+
+.auth-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.auth-header .logo {
+    width: 48px;
+    height: 48px;
+    background-color: var(--primary-color);
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 1rem;
+    color: white;
+}
+
+.auth-header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.form-group label {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.form-group input {
+    padding: 0.625rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background-color: var(--card-bg);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    transition: all 0.2s ease;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.2);
+}
+
+.auth-button {
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    padding: 0.75rem;
+    border-radius: var(--radius-md);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.auth-button:hover {
+    background-color: var(--primary-hover);
+}
+
+.auth-links {
+    margin-top: 1.5rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.auth-links a {
+    color: var(--primary-color);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.auth-links a:hover {
+    text-decoration: underline;
+}
+
+.alert {
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-md);
+    margin-bottom: 1.5rem;
+    font-size: 0.875rem;
+}
+
+.alert-success {
+    background-color: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+}
+
+.alert-error {
+    background-color: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+}
+
+/* Mobile Responsive Design */
+@media (max-width: 768px) {
+    .auth-container {
+        padding: 1rem;
+    }
+
+    .auth-card {
+        padding: 1.5rem;
+    }
+
+    .auth-header {
+        margin-bottom: 1.5rem;
+    }
+
+    .auth-form {
+        gap: 1rem;
+    }
+
+    .auth-header h1 {
+        font-size: clamp(1.25rem, 5vw, 1.5rem);
+    }
+
+    .form-group input {
+        padding: 0.75rem;
+        font-size: 16px; /* Prevent zoom on iOS */
+    }
+
+    .auth-button {
+        padding: 0.875rem;
+        font-size: 1rem;
+    }
+}
+
+/* Small mobile devices */
+@media (max-width: 480px) {
+    .auth-container {
+        padding: 1rem;
+    }
+
+    .auth-card {
+        padding: 1.25rem;
+    }
+
+    .auth-header .logo {
+        width: 40px;
+        height: 40px;
+    }
+
+    .auth-form {
+        gap: 1rem;
+    }
+}
+
+/* Handle different aspect ratios */
+@media (max-height: 600px) and (orientation: landscape) {
+    .auth-container {
+        padding: 0.75rem;
+    }
+
+    .auth-card {
+        padding: 1rem;
+    }
+
+    .auth-header {
+        margin-bottom: 1rem;
+    }
+
+    .auth-header .logo {
+        width: 36px;
+        height: 36px;
+        margin-bottom: 0.5rem;
+    }
+
+    .form-group {
+        gap: 0.25rem;
+    }
+}
+
+/* High-DPI screens */
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+    .auth-card {
+        border-width: 0.5px;
+    }
+}
+
+/* Safe area insets for notched devices */
+@supports (padding: env(safe-area-inset-top)) {
+    .auth-container {
+        padding-top: max(env(safe-area-inset-top), 1rem);
+        padding-bottom: max(env(safe-area-inset-bottom), 1rem);
+        padding-left: max(env(safe-area-inset-left), 1rem);
+        padding-right: max(env(safe-area-inset-right), 1rem);
+    }
+}

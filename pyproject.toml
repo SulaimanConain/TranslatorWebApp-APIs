@@ -1,0 +1,55 @@
+[project]
+name = "healthcare_translator"
+version = "1.0.0"
+description = "Healthcare Translation App"
+dependencies = [
+    "flet>=0.26.0",
+    "requests>=2.31.0",
+    "pymysql>=1.1.0",
+    "werkzeug>=3.0.1",
+    "python-dotenv>=1.0.0"
+]
+
+[build-system]
+requires = ["flet-core"]
+build-backend = "flet.build"
+
+[tool.flet.app]
+module = "main"
+name = "Healthcare Translator"
+identifier = "com.healthcare.translator"
+version = "1.0.0"
+
+[tool.flet]
+app_name = "Healthcare Translator"
+app_short_name = "HealthTrans"
+app_id = "com.healthcare.translator"
+version = "1.0.0"
+description = "A healthcare translation app"
+icon = "./assets/icon.png"
+module_name = "main"
+assets_dir = "assets"
+
+[tool.flet.android]
+package_name = "com.healthcare.translator"
+version_code = 1
+min_sdk_version = 21
+target_sdk_version = 33
+permissions = [
+    "android.permission.INTERNET",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.MICROPHONE",
+    "android.permission.ACCESS_NETWORK_STATE"
+]
+gradle_version = "7.6.3"
+kotlin_version = "1.9.22"
+icon = "./assets/icon-512.png"
+adaptive_icon_background = "#FFFFFF"
+adaptive_icon_foreground = "./assets/icon-192.png"
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.ACCESS_NETWORK_STATE" = true
+
+[tool.flet.android.signing]
+store_file = "keystore.jks" 
