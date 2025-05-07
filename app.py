@@ -13,6 +13,17 @@ import uuid
 import base64
 import random
 from sqlalchemy.orm import joinedload
+from flask_mail import Mail, Message
+from itsdangerous import URLSafeTimedSerializer
+from dotenv import load_dotenv
+import hashlib
+import concurrent.futures
+import asyncio
+import aiohttp
+import time
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -30,12 +41,30 @@ app.config['SECRET_KEY'] = os.urandom(24)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:sherlock@localhost/healthcare_translator'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Initialize SQLAlchemy
-db = SQLAlchemy(app)
+# Mail configuration
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False
+app.config['MAIL_USERNAME'] = os.getenv('DEL_EMAIL').strip("',")
+app.config['MAIL_PASSWORD'] = os.getenv('PASSWORD').strip("',")
+app.config['MAIL_DEFAULT_SENDER'] = ('Healthcare Translator', os.getenv('DEL_EMAIL').strip("',"))
+app.config['MAIL_MAX_EMAILS'] = 5  # Limit number of emails per connection
+app.config['MAIL_ASCII_ATTACHMENTS'] = False
 
-# LLM API Configuration
-LLM_API_URL = "http://localhost:11434/api/generate"
-LLM_MODEL = "mannix/llamax3-8b-alpaca"
+# Initialize extensions
+db = SQLAlchemy(app)
+mail = Mail(app)
+
+# Create serializer for token generation
+serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
+# DeepSeek API Configuration
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY', 'sk-e04d98d1b66440f194203818f43443a6')
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_API_TIMEOUT = 15  # Reduced timeout for faster response
+MAX_RETRIES = 2  # Add retries for failed requests
 
 # Language code mapping
 LANGUAGE_CODES = {
@@ -60,6 +89,15 @@ LANGUAGE_CODES = {
     'ur': 'Urdu'
 }
 
+# Translation cache
+TRANSLATION_CACHE = {}
+MAX_CACHE_SIZE = 1000
+
+def get_cache_key(source_lang, target_lang, text):
+    """Generate a unique cache key for a translation."""
+    key_string = f"{source_lang}:{target_lang}:{text}"
+    return hashlib.md5(key_string.encode()).hexdigest()
+
 # Models
 class User(db.Model):
     __tablename__ = 'users'
@@ -74,14 +112,16 @@ class User(db.Model):
     last_name = db.Column(db.String(100), nullable=False)
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
     last_login = db.Column(db.TIMESTAMP, nullable=True)
+    is_verified = db.Column(db.Boolean, default=False)
 
-    def __init__(self, first_name, last_name, email, unique_user_id, password_hash, translations_remaining=100):
+    def __init__(self, first_name, last_name, email, unique_user_id, password_hash, translations_remaining=100, is_verified=False):
         self.first_name = first_name
         self.last_name = last_name
         self.email = email
         self.unique_user_id = unique_user_id
         self.password_hash = password_hash
         self.translations_remaining = translations_remaining
+        self.is_verified = is_verified
 
 class TranslationSession(db.Model):
     __tablename__ = 'translation_sessions'
@@ -177,18 +217,25 @@ def get_previous_conversations():
 def login():
     if request.method == 'POST':
         email = request.form.get('email')
-        unique_user_id = request.form.get('unique_user_id')
         password = request.form.get('password')
         
-        user = User.query.filter_by(email=email, unique_user_id=unique_user_id).first()
+        user = User.query.filter_by(email=email).first()
         
+        if not user:
+            flash('Invalid email or password', 'error')
+            return render_template('login.html')
+            
+        if not user.is_verified:
+            flash('Please verify your email before logging in. Check your inbox for the verification link.', 'warning')
+            return render_template('login.html')
+            
         if user and check_password_hash(user.password_hash, password):
             session['user_id'] = user.id
             user.last_login = datetime.utcnow()
             db.session.commit()
             return redirect(url_for('index'))
         
-        flash('Invalid credentials', 'error')
+        flash('Invalid email or password', 'error')
     return render_template('login.html')
 
 @app.route('/register', methods=['GET', 'POST'])
@@ -198,6 +245,12 @@ def register():
         last_name = request.form.get('last_name')
         email = request.form.get('email')
         password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        # Check if passwords match
+        if password != confirm_password:
+            flash('Passwords do not match', 'error')
+            return redirect(url_for('register'))
         
         if User.query.filter_by(email=email).first():
             flash('Email already registered', 'error')
@@ -212,16 +265,51 @@ def register():
             email=email,
             unique_user_id=unique_id,
             password_hash=generate_password_hash(password),
-            translations_remaining=100  # Set initial translations
+            translations_remaining=100,
+            is_verified=False
         )
         
         db.session.add(user)
         db.session.commit()
         
-        flash(f'Registration successful! Your Unique User ID is: {unique_id}', 'success')
+        # Generate token and send verification email
+        token = generate_confirmation_token(email)
+        try:
+            send_verification_email(email, token)
+            flash('Registration successful! Please check your email to verify your account.', 'success')
+        except Exception as e:
+            logger.error(f"Failed to send verification email: {str(e)}")
+            flash('Registration successful, but failed to send verification email. Please contact support.', 'warning')
+        
         return redirect(url_for('login'))
     
     return render_template('register.html')
+
+@app.route('/verify-email/<token>')
+def verify_email(token):
+    try:
+        email = confirm_token(token)
+        if not email:
+            flash('The verification link is invalid or has expired.', 'error')
+            return redirect(url_for('login'))
+            
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            flash('User not found.', 'error')
+            return redirect(url_for('login'))
+            
+        if user.is_verified:
+            flash('Account already verified. Please login.', 'info')
+            return redirect(url_for('login'))
+        else:
+            user.is_verified = True
+            db.session.commit()
+            return render_template('verification_success.html')
+            
+    except Exception as e:
+        logger.error(f"Email verification error: {str(e)}")
+        flash('An error occurred during verification.', 'error')
+        return redirect(url_for('login'))
 
 @app.route('/logout')
 def logout():
@@ -242,9 +330,37 @@ def logout():
 # Add error handling for LLM connection
 def check_llm_connection():
     try:
-        response = requests.get("http://localhost:11434/api/version")
-        return response.status_code == 200
-    except requests.exceptions.ConnectionError:
+        # Simple test request to check API connectivity
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+        }
+        
+        payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+        
+        logger.info("Testing DeepSeek API connection...")
+        response = requests.post(
+            DEEPSEEK_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=5
+        )
+        
+        # Attempt to parse response
+        try:
+            response.json()
+            logger.info(f"API connection test result: {response.status_code}")
+            return response.status_code < 400
+        except Exception as e:
+            logger.error(f"API response parse error: {str(e)}")
+            return False
+    except Exception as e:
+        logger.error(f"API connection check failed: {str(e)}")
         return False
 
 @app.route('/process_patient', methods=['POST'])
@@ -254,8 +370,8 @@ def process_patient():
         # Check LLM connection first
         if not check_llm_connection():
             return jsonify({
-                'error': 'Translation service is not available. Please ensure Ollama is running.',
-                'details': 'To start Ollama, open a new terminal and run: ollama serve'
+                'error': 'Translation service is not available. Please try again later.',
+                'details': 'There may be an issue with the DeepSeek API service.'
             }), 503
             
         data = request.get_json()
@@ -307,21 +423,53 @@ def process_patient():
 
         try:
             if translations_enabled:
-                target_lang_name = LANGUAGE_CODES.get(target_language, 'English')
-                prompt = get_translation_prompt(detected_language, target_lang_name, transcript)
+                # Check cache first
+                cache_key = get_cache_key(detected_language, target_language, transcript)
+                start_time = time.time()
                 
-                llm_response = requests.post(
-                    LLM_API_URL,
-                    json={
-                        "model": LLM_MODEL,
-                        "prompt": prompt,
-                        "stream": False
-                    },
-                    timeout=30  # Add timeout
-                )
-                llm_response.raise_for_status()
-                translated_text = llm_response.json().get("response", "").strip()
+                if cache_key in TRANSLATION_CACHE:
+                    logger.info(f"Using cached translation")
+                    translated_text = TRANSLATION_CACHE[cache_key]
+                else:
+                    try:
+                        # Try optimized translation first
+                        logger.info(f"Using optimized translation method")
+                        target_lang_name = LANGUAGE_CODES.get(target_language, 'English')
+                        
+                        # Make sure to pass strings, not language names
+                        logger.info(f"Beginning translation from {detected_language} to {target_lang_name}")
+                        result = run_async(process_translations_batch(
+                            [transcript], 
+                            detected_code,  # Using detected language code, not name
+                            target_language  # Using target language code, not name
+                        ))
+                        
+                        # Check if result dictionary contains our text key
+                        if transcript in result:
+                            translated_text = result[transcript]
+                            
+                            # Check if translation failed
+                            if translated_text and not translated_text.startswith("Translation failed"):
+                                logger.info(f"Optimized translation succeeded")
+                            else:
+                                # Fall back to standard translation
+                                logger.info(f"Optimized translation returned error, falling back to standard")
+                                prompt = get_translation_prompt(detected_language, target_lang_name, transcript)
+                                translated_text = call_deepseek_api(prompt)
+                        else:
+                            # If key not found, fall back
+                            logger.error(f"Translation result did not contain original text key")
+                            prompt = get_translation_prompt(detected_language, target_lang_name, transcript)
+                            translated_text = call_deepseek_api(prompt)
+                    except Exception as e:
+                        logger.error(f"Optimized translation failed: {str(e)}")
+                        # Fallback to standard translation
+                        target_lang_name = LANGUAGE_CODES.get(target_language, 'English')
+                        prompt = get_translation_prompt(detected_language, target_lang_name, transcript)
+                        translated_text = call_deepseek_api(prompt)
                 
+                logger.info(f"Translation completed in {time.time() - start_time:.2f} seconds")
+                        
                 # Decrease translations remaining count
                 user.translations_remaining -= 1
                 db.session.commit()
@@ -338,14 +486,19 @@ def process_patient():
             db.session.add(translation)
             db.session.commit()
             
-            return jsonify({
+            result = {
                 'timestamp': translation.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                 'transcript': transcript,
                 'language': detected_language,
                 'translated_text': translated_text,
                 'session_id': current_session.id,
                 'translations_remaining': user.translations_remaining
-            })
+            }
+            
+            if translations_enabled and 'start_time' in locals():
+                result['translation_time'] = f"{time.time() - start_time:.2f} seconds"
+                
+            return jsonify(result)
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Translation API error: {str(e)}")
@@ -375,22 +528,16 @@ def generate_summary():
         
         prompt = get_summary_prompt(conversation_text)
         
-        llm_response = requests.post(
-            LLM_API_URL,
-            json={
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "stream": False
-            }
-        )
-        llm_response.raise_for_status()
-        summary = llm_response.json().get("response", "").strip()
-        
-        return jsonify({'summary': summary})
+        try:
+            summary = call_deepseek_api(prompt)
+            return jsonify({'summary': summary})
+        except Exception as e:
+            logger.error(f"DeepSeek API error in summary generation: {str(e)}")
+            return jsonify({'error': 'Unable to generate summary. The translation service is temporarily unavailable.'}), 503
         
     except Exception as e:
         logger.error(f"Error generating summary: {str(e)}")
-        return jsonify({'error': 'Failed to generate summary'}), 500
+        return jsonify({'error': 'Failed to generate summary. Please try again later.'}), 500
 
 @app.route('/chat_with_ai', methods=['POST']) # this is for website
 @login_required
@@ -402,44 +549,44 @@ def chat_with_ai():
             
         message = data.get('message')
         session_id = data.get('session_id')
-        user_id = request.get('user_id')
+        user_id = session.get('user_id')  # Get user_id from the session
         
         if not session_id:
             return jsonify({'error': 'No session ID provided'}), 400
+            
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
         
         # Get conversation context
-        translations = translations = db.session.query(Translation).join(TranslationSession).filter(TranslationSession.user_id == user_id).order_by(Translation.timestamp).all()
+        translations = db.session.query(Translation).join(
+            TranslationSession
+        ).filter(
+            TranslationSession.user_id == user_id
+        ).order_by(
+            Translation.timestamp
+        ).all()
+        
         context = "\n".join([f"Original: {t.original_text}\nTranslation: {t.translated_text}" for t in translations])
         
         prompt = get_chat_prompt(context, message)
         
+        logger.info(f"Calling DeepSeek API for chat response with user_id: {user_id}")
+        
         try:
-            llm_response = requests.post(
-                LLM_API_URL,
-                json={
-                    "model": LLM_MODEL,
-                    "prompt": prompt,
-                    "stream": False
-                },
-                timeout=30
-            )
-            llm_response.raise_for_status()
-            response = llm_response.json().get("response", "").strip()
-            
+            response = call_deepseek_api(prompt)
+                
             if not response:
-                raise ValueError("Empty response from LLM")
+                return jsonify({'error': 'The AI assistant could not generate a response. Please try again.'}), 500
                 
             return jsonify({'response': response})
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"LLM API error: {str(e)}")
-            return jsonify({'error': 'AI service temporarily unavailable'}), 503
+        except Exception as e:
+            logger.error(f"Chat API error: {str(e)}")
+            return jsonify({'error': 'The AI assistant is temporarily unavailable. Please try again later.'}), 503
             
     except Exception as e:
         logger.error(f"Error in AI chat: {str(e)}")
-        return jsonify({'error': 'Failed to process chat message'}), 500
-
-
+        return jsonify({'error': 'Failed to process your message. Please try again.'}), 500
 
 @app.route('/clear_conversation', methods=['POST'])
 @login_required
@@ -476,7 +623,6 @@ def clear_conversation():
         logger.error(f"Error clearing user's conversation: {str(e)}")
         db.session.rollback()
         return jsonify({'error': 'Failed to clear conversation', 'message': str(e)}), 500
-
 
 @app.route('/api/clear_conversation', methods=['POST'])
 def api_clear_conversation():
@@ -583,17 +729,29 @@ def api_login():
         logger.info(f"Login attempt for email: {data.get('email')}")
         
         email = data.get('email')
-        unique_user_id = data.get('unique_user_id')
         password = data.get('password')
         
-        if not all([email, unique_user_id, password]):
+        if not all([email, password]):
             return jsonify({
                 'success': False,
-                'error': 'All fields are required'
+                'error': 'Email and password are required'
             }), 400
             
-        user = User.query.filter_by(email=email, unique_user_id=unique_user_id).first()
+        user = User.query.filter_by(email=email).first()
         
+        if not user:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid email or password'
+            }), 401
+            
+        if not user.is_verified:
+            return jsonify({
+                'success': False,
+                'error': 'Please verify your email before logging in',
+                'needs_verification': True
+            }), 401
+            
         if user and check_password_hash(user.password_hash, password):
             # Create new session
             new_session = TranslationSession(
@@ -617,7 +775,7 @@ def api_login():
         else:
             return jsonify({
                 'success': False,
-                'error': 'Invalid credentials'
+                'error': 'Invalid email or password'
             }), 401
             
     except Exception as e:
@@ -633,6 +791,7 @@ def api_register():
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
+        confirm_password = data.get('confirm_password')
         first_name = data.get('first_name')
         last_name = data.get('last_name')
         
@@ -640,6 +799,13 @@ def api_register():
             return jsonify({
                 'success': False,
                 'error': 'All fields are required'
+            }), 400
+            
+        # Check if passwords match
+        if password != confirm_password and confirm_password is not None:
+            return jsonify({
+                'success': False,
+                'error': 'Passwords do not match'
             }), 400
             
         # Check if email already exists
@@ -661,17 +827,28 @@ def api_register():
                 unique_user_id=unique_user_id,
                 first_name=first_name,
                 last_name=last_name,
-                translations_remaining=100
+                translations_remaining=100,
+                is_verified=False
             )
             
             # Save to database
             db.session.add(new_user)
             db.session.commit()
             
+            # Generate token and send verification email
+            token = generate_confirmation_token(email)
+            try:
+                send_verification_email(email, token)
+                message = 'Registration successful! Please check your email to verify your account.'
+            except Exception as e:
+                logger.error(f"Failed to send verification email: {str(e)}")
+                message = 'Registration successful, but failed to send verification email. Please contact support.'
+            
             return jsonify({
                 'success': True,
                 'unique_user_id': unique_user_id,
-                'message': 'Registration successful'
+                'message': message,
+                'needs_verification': True
             }), 200
             
         except Exception as e:
@@ -684,6 +861,47 @@ def api_register():
             
     except Exception as e:
         logger.error(f"Registration error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/resend-verification', methods=['POST'])
+def api_resend_verification():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({
+                'success': False,
+                'error': 'Email is required'
+            }), 400
+            
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({
+                'success': False,
+                'error': 'Email not found'
+            }), 404
+            
+        if user.is_verified:
+            return jsonify({
+                'success': False,
+                'error': 'Email already verified'
+            }), 400
+            
+        # Generate new token and send verification email
+        token = generate_confirmation_token(email)
+        send_verification_email(email, token)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Verification email sent successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Resend verification error: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -718,24 +936,49 @@ def api_translate():
                 'success': False,
                 'error': 'No translations remaining'
             }), 403
-            
-        # Updated prompt for mannix/llamax3-8b-alpaca
-        prompt = get_api_translation_prompt(source_lang, target_lang, text)
-            
-        # Call LLM API with updated model
-        llm_response = requests.post(
-            LLM_API_URL,
-            json={
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.3,  # Lower temperature for more accurate translations
-                "max_tokens": 500
-            }
-        )
         
-        if llm_response.status_code == 200:
-            translated_text = llm_response.json().get('response', '')
+        # Check cache first
+        cache_key = get_cache_key(source_lang, target_lang, text)
+        if cache_key in TRANSLATION_CACHE:
+            logger.info(f"Cache hit for translation")
+            translated_text = TRANSLATION_CACHE[cache_key]
+            
+            # Save translation to database
+            translation = Translation(
+                session_id=session_id,
+                original_text=text,
+                translated_text=translated_text,
+                detected_language=source_lang
+            )
+            db.session.add(translation)
+            
+            # Update translations remaining
+            user.translations_remaining -= 1
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'translation': {
+                    'original_text': text,
+                    'translated_text': translated_text,
+                    'detected_language': source_lang,
+                    'timestamp': translation.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    'cached': True
+                },
+                'translations_remaining': user.translations_remaining
+            })
+        
+        # No cache hit, use the optimized translation
+        start_time = time.time()
+        try:
+            # Use the batch processor even for a single translation for consistency
+            result = run_async(process_translations_batch([text], source_lang, target_lang))
+            translated_text = result.get(text, "Translation failed")
+            
+            if translated_text.startswith("Translation failed"):
+                raise Exception(translated_text)
+                
+            logger.info(f"Translation completed in {time.time() - start_time:.2f} seconds")
             
             # Save translation
             translation = Translation(
@@ -756,16 +999,44 @@ def api_translate():
                     'original_text': text,
                     'translated_text': translated_text,
                     'detected_language': source_lang,
-                    'timestamp': translation.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                    'timestamp': translation.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    'cached': False,
+                    'translation_time': f"{time.time() - start_time:.2f} seconds"
                 },
                 'translations_remaining': user.translations_remaining
             })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Translation service error'
-            }), 500
+        except Exception as e:
+            logger.error(f"Optimized translation API error: {str(e)}")
             
+            # Fallback to standard translation if the optimized version fails
+            logger.info(f"Falling back to standard translation")
+            prompt = get_api_translation_prompt(source_lang, target_lang, text)
+            translated_text = call_deepseek_api(prompt)
+            
+            # Save translation
+            translation = Translation(
+                session_id=session_id,
+                original_text=text,
+                translated_text=translated_text,
+                detected_language=source_lang
+            )
+            db.session.add(translation)
+            
+            # Update translations remaining
+            user.translations_remaining -= 1
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'translation': {
+                    'original_text': text,
+                    'translated_text': translated_text,
+                    'detected_language': source_lang,
+                    'timestamp': translation.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    'fallback': True
+                },
+                'translations_remaining': user.translations_remaining
+            })
     except Exception as e:
         logger.error(f"Translation error: {str(e)}")
         return jsonify({
@@ -786,7 +1057,6 @@ def api_generate_summary():
 
         session_id = data.get('session_id')
         user_id = data.get('user_id')
-        logger.info(f"LLM user id:  {session_id}, {user_id}")
         logger.info(f"Generating summary for session {session_id} and user {user_id}")
         
         if not all([session_id, user_id]):
@@ -819,32 +1089,14 @@ def api_generate_summary():
             conversation.append(f"Translated: {t.translated_text}")
             
         conversation_text = '\n'.join(conversation)
-        
-        #logger.info(f"Prepared conversation with {len(translations)} translations")
             
         # Create prompt for summary
         prompt = get_summary_prompt(conversation_text)
-        logger.info(f"converstaion_text:{prompt} ")
+        logger.info("Calling DeepSeek API for summary generation")
+        
+        try:
+            summary = call_deepseek_api(prompt)
             
-        # Call LLM API
-        logger.info("Calling LLM API for summary generation")
-        llm_response = requests.post(
-            LLM_API_URL,
-            json={
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.3,
-                "max_tokens": 300
-            }
-        )
-        
-        logger.info(f"LLM response status: {llm_response.status_code}")
-        logger.info(f"LLM response: {llm_response.text}")
-        
-        if llm_response.status_code == 200:
-            response_data = llm_response.json()
-            summary = response_data.get('response', '')
             if not summary:
                 logger.error("Empty summary from LLM")
                 return jsonify({
@@ -857,12 +1109,12 @@ def api_generate_summary():
                 'success': True,
                 'summary': summary
             })
-        else:
-            logger.error(f"LLM API error: {llm_response.status_code}")
+        except Exception as e:
+            logger.error(f"DeepSeek API error: {str(e)}")
             return jsonify({
                 'success': False,
                 'error': 'Summary generation failed',
-                'details': f"LLM API returned status code {llm_response.status_code}"
+                'details': str(e)
             }), 500
             
     except Exception as e:
@@ -871,7 +1123,6 @@ def api_generate_summary():
             'success': False,
             'error': f"Failed to generate summary: {str(e)}"
         }), 500
-
 
 @app.route('/api/chat', methods=['POST'])
 def api_chat():
@@ -886,11 +1137,9 @@ def api_chat():
             }), 400
 
         session_id = data.get('session_id')
-        user_id = request.json.get('user_id') if request.json else request.form.get('user_id')# Try both :( This was really frustrating :( 
-
-
+        user_id = request.json.get('user_id') if request.json else request.form.get('user_id')
         message = data.get('message')
-        logger.info(f"Generating AI Asisstant respones for  user id -----------------------------------------------------------------------------------------------------------------------------------------------------------------------> {user_id}")
+        logger.info(f"Generating AI Assistant response for user id: {user_id}")
 
         if not all([session_id, message]):
             return jsonify({
@@ -900,11 +1149,11 @@ def api_chat():
 
         # Get conversation context
         translations = db.session.query(Translation).join(
-            TranslationSession, Translation.session_id == TranslationSession.id
+            TranslationSession
         ).filter(
             TranslationSession.user_id == user_id
         ).order_by(
-            TranslationSession.user_id
+            Translation.timestamp
         ).all()
 
         context = [
@@ -912,26 +1161,15 @@ def api_chat():
             for t in translations
         ]
 
-        # Updated prompt for mannix/llamax3-8b-alpaca
         prompt = get_chat_prompt("\n".join(context), message)
-        logger.info(f"LLM prompt: {prompt}")
+        logger.info(f"Chat prompt prepared")
 
-        llm_response = requests.post(
-            LLM_API_URL,
-            json={
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.4,
-                "max_tokens": 400
-            }
-        )
-
-        if llm_response.status_code == 200:
-            response = llm_response.json().get('response', '')
+        try:
+            response = call_deepseek_api(prompt)
             return jsonify({'success': True, 'response': response})
-        else:
-            return jsonify({'success': False, 'error': 'Chat response generation failed'}), 500
+        except Exception as e:
+            logger.error(f"Chat API error: {str(e)}")
+            return jsonify({'success': False, 'error': f'Chat response generation failed: {str(e)}'}), 500
 
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")
@@ -1003,7 +1241,6 @@ def get_chat_prompt(context, message):
     prompt += "Context:\n"
     prompt += f"Conversation history:\n{context}\n\n"
     prompt += f"User question: {message}\n\n"
-   
     return prompt
 
 def get_api_translation_prompt(source_lang, target_lang, text):
@@ -1045,7 +1282,706 @@ def generate_unique_id(first_name, last_name):
         logger.error(f"Error generating unique ID: {str(e)}")
         raise
 
+# Email verification functions
+def generate_confirmation_token(email):
+    return serializer.dumps(email, salt='email-confirm')
+
+def generate_reset_token(email):
+    return serializer.dumps(email, salt='password-reset')
+
+def confirm_token(token, expiration=3600, salt='email-confirm'):
+    try:
+        email = serializer.loads(token, salt=salt, max_age=expiration)
+        return email
+    except:
+        return False
+
+def send_verification_email(email, token):
+    # Create a message with proper headers
+    msg = Message(
+        'Healthcare Translator - Email Verification',
+        recipients=[email],
+        sender=('Healthcare Translator', app.config['MAIL_USERNAME'])
+    )
+    verification_url = url_for('verify_email', token=token, _external=True)
+    msg.body = f'''Welcome to Healthcare Translator! 
+
+Please click the link below to verify your email address:
+
+{verification_url}
+
+This link will expire in 1 hour.
+
+If you didn't register for an account, please ignore this email.
+
+Thank you,
+Healthcare Translator Team
+support@healthcaretranslator.com
+'''
+
+    # Add HTML content with better formatting
+    msg.html = f'''
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+        <style>
+            @media only screen and (max-width: 620px) {{
+                table.body h1 {{
+                    font-size: 28px !important;
+                    margin-bottom: 10px !important;
+                }}
+                table.body p,
+                table.body ul,
+                table.body ol,
+                table.body td,
+                table.body span,
+                table.body a {{
+                    font-size: 16px !important;
+                }}
+                table.body .wrapper,
+                table.body .article {{
+                    padding: 10px !important;
+                }}
+                table.body .content {{
+                    padding: 0 !important;
+                }}
+            }}
+            body {{
+                font-family: Helvetica, Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                color: #333333;
+                background-color: #f6f6f6;
+                line-height: 1.5;
+            }}
+            .wrapper {{
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #ffffff;
+                border-radius: 5px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            }}
+            .header {{
+                padding: 20px;
+                text-align: center;
+                border-bottom: 1px solid #eeeeee;
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 24px;
+                color: #333333;
+            }}
+            .content {{
+                padding: 20px;
+            }}
+            .button {{
+                display: inline-block;
+                background-color: #4CAF50;
+                color: white !important;
+                padding: 12px 24px;
+                text-decoration: none;
+                border-radius: 5px;
+                font-weight: bold;
+                margin: 20px 0;
+            }}
+            .footer {{
+                font-size: 12px;
+                color: #777777;
+                text-align: center;
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #eeeeee;
+            }}
+        </style>
+    </head>
+    <body>
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" class="body" width="100%">
+            <tr>
+                <td>&nbsp;</td>
+                <td class="container">
+                    <div class="wrapper">
+                        <div class="header">
+                            <h1>Healthcare Translator</h1>
+                        </div>
+                        <div class="content">
+                            <h2>Welcome to Healthcare Translator!</h2>
+                            <p>Thank you for registering with us. To complete your registration and verify your email address, please click the button below:</p>
+                            <div style="text-align: center;">
+                                <a href="{verification_url}" class="button">Verify Email Address</a>
+                            </div>
+                            <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
+                            <p><a href="{verification_url}">{verification_url}</a></p>
+                            <p>This link will expire in 1 hour.</p>
+                            <p>If you didn't register for an account, please ignore this email.</p>
+                            <p>Best regards,<br>Healthcare Translator Team</p>
+                        </div>
+                        <div class="footer">
+                            <p>&copy; {datetime.now().year} Healthcare Translator. All rights reserved.</p>
+                            <p>This is a one-time email sent to verify your account.</p>
+                            <p><a href="mailto:support@healthcaretranslator.com">support@healthcaretranslator.com</a></p>
+                        </div>
+                    </div>
+                </td>
+                <td>&nbsp;</td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    '''
+    
+    # Add some headers to improve deliverability
+    msg.extra_headers = {
+        'List-Unsubscribe': f'<mailto:unsubscribe@healthcaretranslator.com?subject=Unsubscribe {email}>',
+        'X-Priority': '1',  # High priority
+        'Precedence': 'bulk',
+        'Auto-Submitted': 'auto-generated'
+    }
+    
+    try:
+        mail.send(msg)
+        logger.info(f"Verification email sent to {email}")
+    except Exception as e:
+        logger.error(f"Failed to send verification email: {str(e)}")
+        raise
+
+def send_password_reset_email(email, token):
+    # Create a message with proper headers
+    msg = Message(
+        'Healthcare Translator - Password Reset Request',
+        recipients=[email],
+        sender=('Healthcare Translator', app.config['MAIL_USERNAME'])
+    )
+    reset_url = url_for('reset_password', token=token, _external=True)
+    msg.body = f'''You requested a password reset for your Healthcare Translator account.
+
+Please click the link below to reset your password:
+
+{reset_url}
+
+This link will expire in 1 hour.
+
+If you didn't request a password reset, please ignore this email and your password will remain unchanged.
+
+Thank you,
+Healthcare Translator Team
+support@healthcaretranslator.com'''
+
+    # Add HTML content with better formatting
+    msg.html = f'''
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+        <style>
+            @media only screen and (max-width: 620px) {{
+                table.body h1 {{
+                    font-size: 28px !important;
+                    margin-bottom: 10px !important;
+                }}
+                table.body p,
+                table.body ul,
+                table.body ol,
+                table.body td,
+                table.body span,
+                table.body a {{
+                    font-size: 16px !important;
+                }}
+                table.body .wrapper,
+                table.body .article {{
+                    padding: 10px !important;
+                }}
+                table.body .content {{
+                    padding: 0 !important;
+                }}
+            }}
+            body {{
+                font-family: Helvetica, Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                color: #333333;
+                background-color: #f6f6f6;
+                line-height: 1.5;
+            }}
+            .wrapper {{
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #ffffff;
+                border-radius: 5px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            }}
+            .header {{
+                padding: 20px;
+                text-align: center;
+                border-bottom: 1px solid #eeeeee;
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 24px;
+                color: #333333;
+            }}
+            .content {{
+                padding: 20px;
+            }}
+            .button {{
+                display: inline-block;
+                background-color: #4CAF50;
+                color: white !important;
+                padding: 12px 24px;
+                text-decoration: none;
+                border-radius: 5px;
+                font-weight: bold;
+                margin: 20px 0;
+            }}
+            .footer {{
+                font-size: 12px;
+                color: #777777;
+                text-align: center;
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #eeeeee;
+            }}
+        </style>
+    </head>
+    <body>
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" class="body" width="100%">
+            <tr>
+                <td>&nbsp;</td>
+                <td class="container">
+                    <div class="wrapper">
+                        <div class="header">
+                            <h1>Healthcare Translator</h1>
+                        </div>
+                        <div class="content">
+                            <h2>Password Reset Request</h2>
+                            <p>We received a request to reset your password for your Healthcare Translator account. To create a new password, please click the button below:</p>
+                            <div style="text-align: center;">
+                                <a href="{reset_url}" class="button">Reset Your Password</a>
+                            </div>
+                            <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
+                            <p><a href="{reset_url}">{reset_url}</a></p>
+                            <p>This link will expire in 1 hour.</p>
+                            <p>If you didn't request a password reset, you can safely ignore this email - your password will remain unchanged.</p>
+                            <p>Best regards,<br>Healthcare Translator Team</p>
+                        </div>
+                        <div class="footer">
+                            <p>&copy; {datetime.now().year} Healthcare Translator. All rights reserved.</p>
+                            <p>This email was sent in response to your password reset request.</p>
+                            <p><a href="mailto:support@healthcaretranslator.com">support@healthcaretranslator.com</a></p>
+                        </div>
+                    </div>
+                </td>
+                <td>&nbsp;</td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    '''
+    
+    # Add some headers to improve deliverability
+    msg.extra_headers = {
+        'List-Unsubscribe': f'<mailto:unsubscribe@healthcaretranslator.com?subject=Unsubscribe {email}>',
+        'X-Priority': '1',  # High priority
+        'Precedence': 'bulk',
+        'Auto-Submitted': 'auto-generated'
+    }
+    
+    try:
+        mail.send(msg)
+        logger.info(f"Password reset email sent to {email}")
+    except Exception as e:
+        logger.error(f"Failed to send password reset email: {str(e)}")
+        raise
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        
+        if not email:
+            flash('Email is required', 'error')
+            return render_template('forgot_password.html')
+            
+        user = User.query.filter_by(email=email).first()
+        
+        # Always show success message even if email doesn't exist (security best practice)
+        if user:
+            token = generate_reset_token(email)
+            try:
+                send_password_reset_email(email, token)
+                logger.info(f"Password reset email sent to {email}")
+            except Exception as e:
+                logger.error(f"Failed to send password reset email: {str(e)}")
+                # Still show success to user for security reasons
+        
+        flash('If your email is registered, you will receive password reset instructions.', 'success')
+        return redirect(url_for('login'))
+        
+    return render_template('forgot_password.html')
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    if request.method == 'POST':
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not password or not confirm_password:
+            flash('Both password fields are required', 'error')
+            return render_template('reset_password.html', token=token)
+            
+        if password != confirm_password:
+            flash('Passwords do not match', 'error')
+            return render_template('reset_password.html', token=token)
+            
+        email = confirm_token(token, salt='password-reset')
+        if not email:
+            flash('The password reset link is invalid or has expired.', 'error')
+            return redirect(url_for('forgot_password'))
+            
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            flash('User not found', 'error')
+            return redirect(url_for('login'))
+            
+        user.password_hash = generate_password_hash(password)
+        db.session.commit()
+        
+        flash('Your password has been updated! You can now log in with your new password.', 'success')
+        return redirect(url_for('login'))
+        
+    # GET request handling
+    email = confirm_token(token, salt='password-reset')
+    if not email:
+        flash('The password reset link is invalid or has expired.', 'error')
+        return redirect(url_for('forgot_password'))
+        
+    return render_template('reset_password.html', token=token)
+
+@app.route('/api/forgot-password', methods=['POST'])
+def api_forgot_password():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({
+                'success': False,
+                'error': 'Email is required'
+            }), 400
+            
+        user = User.query.filter_by(email=email).first()
+        
+        # Always show success message even if email doesn't exist (security best practice)
+        if user:
+            token = generate_reset_token(email)
+            try:
+                send_password_reset_email(email, token)
+                logger.info(f"Password reset email sent to {email}")
+            except Exception as e:
+                logger.error(f"Failed to send password reset email: {str(e)}")
+                # Still return success for security reasons
+        
+        return jsonify({
+            'success': True,
+            'message': 'If your email is registered, you will receive password reset instructions'
+        })
+        
+    except Exception as e:
+        logger.error(f"API forgot password error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'An error occurred while processing your request'
+        }), 500
+
+@app.route('/api/reset-password', methods=['POST'])
+def api_reset_password():
+    try:
+        data = request.get_json()
+        token = data.get('token')
+        password = data.get('password')
+        confirm_password = data.get('confirm_password')
+        
+        if not all([token, password, confirm_password]):
+            return jsonify({
+                'success': False,
+                'error': 'All fields are required'
+            }), 400
+            
+        if password != confirm_password:
+            return jsonify({
+                'success': False,
+                'error': 'Passwords do not match'
+            }), 400
+            
+        email = confirm_token(token, salt='password-reset')
+        if not email:
+            return jsonify({
+                'success': False,
+                'error': 'The password reset link is invalid or has expired'
+            }), 400
+            
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({
+                'success': False,
+                'error': 'User not found'
+            }), 404
+            
+        user.password_hash = generate_password_hash(password)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Your password has been updated successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"API reset password error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'An error occurred while processing your request'
+        }), 500
+
+def setup_gmail_settings():
+    """
+    Print instructions for setting up Gmail for better email deliverability
+    """
+    print("\n========== Gmail Setup for Better Email Deliverability ==========")
+    print("1. Make sure you've enabled 'Less secure app access' or created an App Password")
+    print("2. Verify your Gmail account has completed the following:")
+    print("   - Set up SPF records in your DNS if you have a custom domain")
+    print("   - Add a profile picture to your Gmail account")
+    print("   - Use a recognizable sender name ('Healthcare Translator')")
+    print("   - Ensure your account is in good standing with Google")
+    print("3. For the recipient:")
+    print("   - Add sender email to contacts")
+    print("   - Mark any received emails as 'Not Spam'")
+    print("   - Create a filter to always allow emails from this sender")
+    print("===================================================================\n")
+
+# DeepSeek API function
+def call_deepseek_api(prompt, use_cache=True):
+    # For translation prompts, try to use cache
+    if use_cache and "Task: Translate the following" in prompt:
+        # Extract text to translate and languages from prompt
+        text_match = re.search(r"Text to translate: (.+?)(?:\n|$)", prompt)
+        from_match = re.search(r"from (\w+) to (\w+)", prompt)
+        
+        if text_match and from_match:
+            text = text_match.group(1)
+            source_lang = from_match.group(1)
+            target_lang = from_match.group(2)
+            
+            # Check cache
+            cache_key = get_cache_key(source_lang, target_lang, text)
+            if cache_key in TRANSLATION_CACHE:
+                logger.info(f"Using cached translation for text: {text[:30]}...")
+                return TRANSLATION_CACHE[cache_key]
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+    }
+    
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a medical translation assistant, providing accurate and contextually appropriate translations and summaries."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3
+    }
+    
+    try:
+        logger.info(f"Calling DeepSeek API with model: {DEEPSEEK_MODEL}")
+        response = requests.post(
+            DEEPSEEK_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        # Log response status and headers for debugging
+        logger.info(f"DeepSeek API response status: {response.status_code}")
+        logger.info(f"DeepSeek API response headers: {response.headers}")
+        
+        # Check if response is successful
+        if response.status_code >= 400:
+            error_message = f"DeepSeek API returned status code {response.status_code}"
+            try:
+                if response.headers.get('Content-Type', '').startswith('application/json'):
+                    error_data = response.json()
+                    if 'error' in error_data:
+                        error_message += f": {error_data['error']}"
+            except:
+                error_message += f": {response.text[:200]}"
+            logger.error(error_message)
+            raise Exception(error_message)
+            
+        # Parse JSON response
+        try:
+            response_data = response.json()
+        except requests.exceptions.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {str(e)}")
+            logger.error(f"Response content: {response.text[:500]}")
+            raise Exception(f"Invalid JSON response from DeepSeek API: {str(e)}")
+        
+        # Check if response has expected format
+        if "choices" not in response_data or not response_data["choices"]:
+            logger.error(f"Unexpected response format: {response_data}")
+            raise Exception("Unexpected response format from DeepSeek API")
+        
+        if "message" not in response_data["choices"][0]:
+            logger.error(f"Missing message in response: {response_data}")
+            raise Exception("Missing message in response from DeepSeek API")
+            
+        result = response_data["choices"][0]["message"]["content"].strip()
+        
+        # Store in cache if it's a translation
+        if use_cache and "Task: Translate the following" in prompt and text_match and from_match:
+            cache_key = get_cache_key(source_lang, target_lang, text)
+            # Limit cache size
+            if len(TRANSLATION_CACHE) >= MAX_CACHE_SIZE:
+                # Remove a random key to prevent it from growing indefinitely
+                TRANSLATION_CACHE.pop(next(iter(TRANSLATION_CACHE)))
+            TRANSLATION_CACHE[cache_key] = result
+            logger.info(f"Stored translation in cache, key: {cache_key[:10]}...")
+        
+        return result
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error: {str(e)}")
+        raise Exception(f"Failed to connect to DeepSeek API: {str(e)}")
+        
+    except Exception as e:
+        logger.error(f"Unknown error: {str(e)}")
+        raise
+
+# Add a function to validate API key at startup
+def validate_deepseek_api_key():
+    if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == 'sk-e04d98d1b66440f194203818f43443a6':
+        logger.warning("⚠️ Using default DeepSeek API key. Set DEEPSEEK_API_KEY environment variable for production use.")
+    logger.info(f"Using DeepSeek API URL: {DEEPSEEK_API_URL}")
+    logger.info(f"Using DeepSeek model: {DEEPSEEK_MODEL}")
+
+# Add a function for batch processing
+async def process_translations_batch(texts, source_lang, target_lang):
+    """Process multiple translations concurrently for faster responses."""
+    async def translate_single(text):
+        try:
+            logger.info(f"Starting translation for text: {text[:30]}...")
+            cache_key = get_cache_key(source_lang, target_lang, text)
+            if cache_key in TRANSLATION_CACHE:
+                logger.info(f"Cache hit for key: {cache_key[:10]}...")
+                return text, TRANSLATION_CACHE[cache_key]
+                
+            target_lang_name = LANGUAGE_CODES.get(target_lang, target_lang)
+            source_lang_name = LANGUAGE_CODES.get(source_lang, source_lang)
+            prompt = f"Task: Translate the following text from {source_lang_name} to {target_lang_name}.\n"
+            prompt += f"Text to translate: {text}\n"
+            prompt += "Instructions:\n1. Maintain accuracy\n2. Preserve the original meaning\n3. Return only the translated text"
+            
+            # Make API call
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+            }
+            
+            payload = {
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You are a fast medical translation assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2,  # Lower temperature for faster and more deterministic responses
+                "max_tokens": 300  # Limit response length for faster processing
+            }
+            
+            logger.info(f"Making async API call to DeepSeek for text: {text[:30]}...")
+            
+            # Use aiohttp for async API call
+            async with aiohttp.ClientSession() as session:
+                for attempt in range(MAX_RETRIES + 1):
+                    try:
+                        logger.info(f"Attempt {attempt+1}/{MAX_RETRIES+1} for translation")
+                        async with session.post(
+                            DEEPSEEK_API_URL,
+                            headers=headers,
+                            json=payload,
+                            timeout=DEEPSEEK_API_TIMEOUT
+                        ) as response:
+                            logger.info(f"API Response status: {response.status}")
+                            if response.status == 200:
+                                data = await response.json()
+                                logger.info("Successfully parsed response JSON")
+                                
+                                if "choices" not in data or not data["choices"] or "message" not in data["choices"][0]:
+                                    logger.error(f"Invalid response format: {data}")
+                                    if attempt < MAX_RETRIES:
+                                        await asyncio.sleep(0.5)
+                                        continue
+                                    else:
+                                        return text, f"Translation failed: Invalid API response format"
+                                        
+                                result = data["choices"][0]["message"]["content"].strip()
+                                logger.info(f"Translation successful: {result[:30]}...")
+                                TRANSLATION_CACHE[cache_key] = result
+                                return text, result
+                            else:
+                                response_text = await response.text()
+                                logger.error(f"API error: {response.status}, Response: {response_text[:200]}")
+                                if attempt < MAX_RETRIES:
+                                    logger.info(f"Retrying translation after error...")
+                                    await asyncio.sleep(0.5)
+                                    continue
+                                else:
+                                    return text, f"Translation failed: API error {response.status}"
+                    except asyncio.TimeoutError:
+                        logger.error(f"Timeout during API call (attempt {attempt+1})")
+                        if attempt < MAX_RETRIES:
+                            await asyncio.sleep(1)  # Longer delay after timeout
+                            continue
+                        else:
+                            return text, "Translation failed: API timeout"
+                    except Exception as e:
+                        logger.error(f"Error during API call: {str(e)}")
+                        if attempt < MAX_RETRIES:
+                            await asyncio.sleep(0.5)
+                            continue
+                        else:
+                            return text, f"Translation failed: {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error in translate_single: {str(e)}")
+            return text, f"Translation failed: {str(e)}"
+    
+    try:
+        # Process all translations concurrently
+        logger.info(f"Starting batch translation for {len(texts)} texts")
+        tasks = [translate_single(text) for text in texts]
+        results = await asyncio.gather(*tasks)
+        logger.info(f"Batch translation completed")
+        return dict(results)
+    except Exception as e:
+        logger.error(f"Batch translation error: {str(e)}")
+        # Fallback to returning empty results
+        return {text: f"Translation failed: {str(e)}" for text in texts}
+    
+# Helper function to run async code from sync context
+def run_async(coroutine):
+    """Run an async function from a synchronous context."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        # If no event loop exists, create one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coroutine)
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        setup_gmail_settings()
+        validate_deepseek_api_key()
     app.run(host='0.0.0.0', port=8800, debug=True)
